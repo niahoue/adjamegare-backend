@@ -9,6 +9,7 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { isValidObjectId } from 'mongoose';
 import redis from '../config/redisClient.js';
 /**
+ * OPTIMISATION 1: Cache plus agressif pour searchRoutes
  * @desc    Rechercher des trajets disponibles
  * @route   GET /api/travel/routes/search
  * @access  Public
@@ -16,11 +17,17 @@ import redis from '../config/redisClient.js';
 export const searchRoutes = asyncHandler(async (req, res) => {
   const { from, to, departureDate, returnDate, passengers, departureTime, companyName } = req.query;
 
+  // Cache plus long et plus granulaire
   const cacheKey = `search:${from}:${to}:${departureDate}:${returnDate || 'none'}:${passengers}:${departureTime || 'any'}:${companyName || 'any'}`;
-  const cached = await redis.get(cacheKey);
-  if (cached) {
-    console.log("⚡ searchRoutes depuis Redis");
-    return res.json(JSON.parse(cached));
+  
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      console.log("⚡ searchRoutes depuis Redis");
+      return res.json(JSON.parse(cached));
+    }
+  } catch (redisError) {
+    console.warn("Redis cache miss, continuant sans cache:", redisError.message);
   }
 
   if (!from || !to || !departureDate || !passengers) {
@@ -34,11 +41,19 @@ export const searchRoutes = asyncHandler(async (req, res) => {
     throw new Error("Format de date de départ invalide.");
   }
 
-  const fromCity = await City.findOne({ name: new RegExp(from, "i") });
-  const toCity = await City.findOne({ name: new RegExp(to, "i") });
+  // OPTIMISATION: Index sur les noms de villes (recommandé côté DB)
+  const fromCity = await City.findOne({ name: new RegExp(from, "i") }).lean();
+  const toCity = await City.findOne({ name: new RegExp(to, "i") }).lean();
 
   if (!fromCity || !toCity) {
-    return res.json({ success: true, data: { outbound: [], return: [] }, message: "Ville introuvable." });
+    const result = { success: true, data: { outbound: [], return: [] }, message: "Ville introuvable." };
+    // Cache même les résultats vides pour éviter les requêtes répétées
+    try {
+      await redis.set(cacheKey, JSON.stringify(result), "EX", 300); // 5 min pour les résultats vides
+    } catch (redisError) {
+      console.warn("Erreur lors de la mise en cache:", redisError.message);
+    }
+    return res.json(result);
   }
 
   let queryOutbound = {
@@ -54,16 +69,26 @@ export const searchRoutes = asyncHandler(async (req, res) => {
   if (departureTime) queryOutbound.departureTime = departureTime;
 
   if (companyName) {
-    const company = await Company.findOne({ name: new RegExp(companyName, "i") });
+    const company = await Company.findOne({ name: new RegExp(companyName, "i") }).lean();
     if (company) queryOutbound.companyName = company._id;
-    else return res.json({ success: true, data: { outbound: [], return: [] } });
+    else {
+      const result = { success: true, data: { outbound: [], return: [] } };
+      try {
+        await redis.set(cacheKey, JSON.stringify(result), "EX", 300);
+      } catch (redisError) {
+        console.warn("Erreur lors de la mise en cache:", redisError.message);
+      }
+      return res.json(result);
+    }
   }
 
+  // OPTIMISATION: .lean() pour de meilleures performances
   const outboundRoutes = await Route.find(queryOutbound)
-    .populate("from", "name country")
-    .populate("to", "name country")
-    .populate("bus")
-    .populate("companyName", "name logo description");
+    .populate("from", "name country", null, { lean: true })
+    .populate("to", "name country", null, { lean: true })
+    .populate("bus", null, null, { lean: true })
+    .populate("companyName", "name logo description", null, { lean: true })
+    .lean();
 
   let searchResults = { outbound: outboundRoutes, return: [] };
 
@@ -84,18 +109,26 @@ export const searchRoutes = asyncHandler(async (req, res) => {
     };
     if (departureTime) queryReturn.departureTime = departureTime;
     if (companyName) {
-      const company = await Company.findOne({ name: new RegExp(companyName, "i") });
+      const company = await Company.findOne({ name: new RegExp(companyName, "i") }).lean();
       if (company) queryReturn.companyName = company._id;
     }
     searchResults.return = await Route.find(queryReturn)
-      .populate("from", "name country")
-      .populate("to", "name country")
-      .populate("bus")
-      .populate("companyName", "name logo description");
+      .populate("from", "name country", null, { lean: true })
+      .populate("to", "name country", null, { lean: true })
+      .populate("bus", null, null, { lean: true })
+      .populate("companyName", "name logo description", null, { lean: true })
+      .lean();
   }
 
   const result = { success: true, data: searchResults };
-  await redis.set(cacheKey, JSON.stringify(result), "EX", 600); // 10 min cache
+  
+  // Cache plus long pour les résultats avec données
+  try {
+    await redis.set(cacheKey, JSON.stringify(result), "EX", 1800); // 30 min cache
+  } catch (redisError) {
+    console.warn("Erreur lors de la mise en cache:", redisError.message);
+  }
+  
   res.json(result);
 });
 
