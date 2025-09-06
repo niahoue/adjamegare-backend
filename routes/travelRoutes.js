@@ -21,14 +21,15 @@ import {
   getPopularRoutes,
   getArrivalCities, 
   getAllCities,
-  getDepartureCities, // Ajout de la nouvelle fonction
+  getDepartureCities,
+  hybridCache
 } from '../controllers/travelController.js';
 
 const router = express.Router();
 
 // Routes publiques pour la recherche et les détails des trajets
-router.get('/routes/search', searchRoutes);
-router.get('/routes/all', getAllRoutes);
+router.get('/routes/search',hybridCache(1800), searchRoutes);
+router.get('/routes/all',hybridCache(900), getAllRoutes);
 router.get('/routes/popular', getPopularRoutes);
 router.get('/routes/suggested', getSuggestedRoutes);
 router.get('/routes/:id', getRouteById);
@@ -38,8 +39,8 @@ router.get('/stations', getAllStations);
 router.get('/stations/:id', getStationById);
 router.get('/bookings/:id/track', trackBooking);
 router.get('/cities/arrival', getArrivalCities);
-router.get('/cities/all', getAllCities);
-router.get('/cities/departure', getDepartureCities); // Nouvelle route ajoutée
+router.get('/cities/all',hybridCache(7200), getAllCities);
+router.get('/cities/departure', getDepartureCities); 
 
 // Routes protégées pour les utilisateurs authentifiés
 router.post('/bookings', protect, createBooking);

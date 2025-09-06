@@ -4,6 +4,6 @@ import { createPartnerRequest } from "../controllers/partnerController.js";
 
 const router = express.Router();
 
-router.post("/partners/request", createPartnerRequest);
+router.post("/request", createPartnerRequest);
 
 export default router;

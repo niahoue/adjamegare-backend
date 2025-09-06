@@ -9,7 +9,6 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { isValidObjectId } from 'mongoose';
 import redis from '../config/redisClient.js';
 /**
- * OPTIMISATION 1: Cache plus agressif pour searchRoutes
  * @desc    Rechercher des trajets disponibles
  * @route   GET /api/travel/routes/search
  * @access  Public
@@ -17,7 +16,7 @@ import redis from '../config/redisClient.js';
 export const searchRoutes = asyncHandler(async (req, res) => {
   const { from, to, departureDate, returnDate, passengers, departureTime, companyName } = req.query;
 
-  // Cache plus long et plus granulaire
+  // Cache plus granulaire avec TTL différentiel
   const cacheKey = `search:${from}:${to}:${departureDate}:${returnDate || 'none'}:${passengers}:${departureTime || 'any'}:${companyName || 'any'}`;
   
   try {
@@ -27,106 +26,160 @@ export const searchRoutes = asyncHandler(async (req, res) => {
       return res.json(JSON.parse(cached));
     }
   } catch (redisError) {
-    console.warn("Redis cache miss, continuant sans cache:", redisError.message);
+    console.warn("Redis indisponible, continuant sans cache:", redisError.message);
   }
 
   if (!from || !to || !departureDate || !passengers) {
-    res.status(400);
-    throw new Error("Veuillez fournir les lieux de départ, d'arrivée, la date et le nombre de passagers.");
+    return res.status(400).json({
+      success: false,
+      message: "Veuillez fournir les lieux de départ, d'arrivée, la date et le nombre de passagers."
+    });
   }
 
   const depDate = new Date(departureDate);
   if (isNaN(depDate.getTime())) {
-    res.status(400);
-    throw new Error("Format de date de départ invalide.");
+    return res.status(400).json({
+      success: false,
+      message: "Format de date de départ invalide."
+    });
   }
 
-  // OPTIMISATION: Index sur les noms de villes (recommandé côté DB)
-  const fromCity = await City.findOne({ name: new RegExp(from, "i") }).lean();
-  const toCity = await City.findOne({ name: new RegExp(to, "i") }).lean();
+  // Recherche parallèle des villes avec cache local
+  const [fromCity, toCity] = await Promise.all([
+    City.findOne({ name: new RegExp(from, "i") }, "_id name").lean(),
+    City.findOne({ name: new RegExp(to, "i") }, "_id name").lean()
+  ]);
 
   if (!fromCity || !toCity) {
-    const result = { success: true, data: { outbound: [], return: [] }, message: "Ville introuvable." };
-    // Cache même les résultats vides pour éviter les requêtes répétées
+    const result = { 
+      success: true, 
+      data: { outbound: [], return: [] }, 
+      message: "Ville introuvable." 
+    };
+    // Cache court pour les résultats vides
     try {
-      await redis.set(cacheKey, JSON.stringify(result), "EX", 300); // 5 min pour les résultats vides
+      await redis.set(cacheKey, JSON.stringify(result), "EX", 300);
     } catch (redisError) {
-      console.warn("Erreur lors de la mise en cache:", redisError.message);
+      console.warn("Erreur cache:", redisError.message);
     }
     return res.json(result);
   }
 
-  let queryOutbound = {
+  // Pipeline d'agrégation optimisé
+  const baseMatch = {
     from: fromCity._id,
     to: toCity._id,
     departureDate: {
       $gte: new Date(depDate.setHours(0, 0, 0, 0)),
       $lt: new Date(depDate.setHours(23, 59, 59, 999)),
     },
-    availableSeats: { $gte: parseInt(passengers) },
+    availableSeats: { $gte: parseInt(passengers) }
   };
 
-  if (departureTime) queryOutbound.departureTime = departureTime;
-
+  if (departureTime) baseMatch.departureTime = departureTime;
   if (companyName) {
-    const company = await Company.findOne({ name: new RegExp(companyName, "i") }).lean();
-    if (company) queryOutbound.companyName = company._id;
+    const company = await Company.findOne({ name: new RegExp(companyName, "i") }, "_id").lean();
+    if (company) baseMatch.companyName = company._id;
     else {
       const result = { success: true, data: { outbound: [], return: [] } };
       try {
         await redis.set(cacheKey, JSON.stringify(result), "EX", 300);
       } catch (redisError) {
-        console.warn("Erreur lors de la mise en cache:", redisError.message);
+        console.warn("Erreur cache:", redisError.message);
       }
       return res.json(result);
     }
   }
 
-  // OPTIMISATION: .lean() pour de meilleures performances
-  const outboundRoutes = await Route.find(queryOutbound)
-    .populate("from", "name country", null, { lean: true })
-    .populate("to", "name country", null, { lean: true })
-    .populate("bus", null, null, { lean: true })
-    .populate("companyName", "name logo description", null, { lean: true })
-    .lean();
+  // Agrégation optimisée avec lookup
+  const pipeline = [
+    { $match: baseMatch },
+    {
+      $lookup: {
+        from: "cities",
+        localField: "from",
+        foreignField: "_id",
+        as: "fromCity",
+        pipeline: [{ $project: { name: 1, country: 1 } }]
+      }
+    },
+    {
+      $lookup: {
+        from: "cities",
+        localField: "to",
+        foreignField: "_id",
+        as: "toCity",
+        pipeline: [{ $project: { name: 1, country: 1 } }]
+      }
+    },
+    {
+      $lookup: {
+        from: "buses",
+        localField: "bus",
+        foreignField: "_id",
+        as: "busInfo"
+      }
+    },
+    {
+      $lookup: {
+        from: "companies",
+        localField: "companyName",
+        foreignField: "_id",
+        as: "company",
+        pipeline: [{ $project: { name: 1, logo: 1, description: 1 } }]
+      }
+    },
+    {
+      $project: {
+        from: { $arrayElemAt: ["$fromCity", 0] },
+        to: { $arrayElemAt: ["$toCity", 0] },
+        bus: { $arrayElemAt: ["$busInfo", 0] },
+        companyName: { $arrayElemAt: ["$company", 0] },
+        departureDate: 1,
+        departureTime: 1,
+        arrivalTime: 1,
+        duration: 1,
+        price: 1,
+        availableSeats: 1,
+        amenities: 1,
+        features: 1,
+        stops: 1
+      }
+    }
+  ];
+
+  const outboundRoutes = await Route.aggregate(pipeline);
 
   let searchResults = { outbound: outboundRoutes, return: [] };
 
+  // Trajet retour si demandé
   if (returnDate) {
     const retDate = new Date(returnDate);
-    if (isNaN(retDate.getTime())) {
-      res.status(400);
-      throw new Error("Format de date de retour invalide.");
+    if (!isNaN(retDate.getTime())) {
+      const returnMatch = {
+        ...baseMatch,
+        from: toCity._id,
+        to: fromCity._id,
+        departureDate: {
+          $gte: new Date(retDate.setHours(0, 0, 0, 0)),
+          $lt: new Date(retDate.setHours(23, 59, 59, 999)),
+        }
+      };
+
+      const returnPipeline = [...pipeline];
+      returnPipeline[0] = { $match: returnMatch };
+      searchResults.return = await Route.aggregate(returnPipeline);
     }
-    let queryReturn = {
-      from: toCity._id,
-      to: fromCity._id,
-      departureDate: {
-        $gte: new Date(retDate.setHours(0, 0, 0, 0)),
-        $lt: new Date(retDate.setHours(23, 59, 59, 999)),
-      },
-      availableSeats: { $gte: parseInt(passengers) },
-    };
-    if (departureTime) queryReturn.departureTime = departureTime;
-    if (companyName) {
-      const company = await Company.findOne({ name: new RegExp(companyName, "i") }).lean();
-      if (company) queryReturn.companyName = company._id;
-    }
-    searchResults.return = await Route.find(queryReturn)
-      .populate("from", "name country", null, { lean: true })
-      .populate("to", "name country", null, { lean: true })
-      .populate("bus", null, null, { lean: true })
-      .populate("companyName", "name logo description", null, { lean: true })
-      .lean();
   }
 
   const result = { success: true, data: searchResults };
   
-  // Cache plus long pour les résultats avec données
+  // Cache adaptatif basé sur la quantité de résultats
+  const ttl = searchResults.outbound.length > 0 ? 1800 : 300; // 30min si résultats, 5min sinon
   try {
-    await redis.set(cacheKey, JSON.stringify(result), "EX", 1800); // 30 min cache
+    await redis.set(cacheKey, JSON.stringify(result), "EX", ttl);
   } catch (redisError) {
-    console.warn("Erreur lors de la mise en cache:", redisError.message);
+    console.warn("Erreur cache:", redisError.message);
   }
   
   res.json(result);
@@ -1079,69 +1132,239 @@ export const getStationById = asyncHandler(async (req, res) => {
  * @access  Public
  */
 export const getAllRoutes = asyncHandler(async (req, res) => {
+  const { page = 1, limit = 20, from, to, company } = req.query;
+  const skip = (parseInt(page) - 1) * parseInt(limit);
+
+  // Cache basé sur les paramètres de pagination
+  const cacheKey = `routes:all:${page}:${limit}:${from || 'any'}:${to || 'any'}:${company || 'any'}`;
+  
   try {
-    const now = new Date();
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      console.log("⚡ getAllRoutes depuis Redis");
+      return res.json(JSON.parse(cached));
+    }
+  } catch (redisError) {
+    console.warn("Redis indisponible:", redisError.message);
+  }
 
-    // On filtre d’abord par date
-    let routes = await Route.find({
-      $or: [
-        { departureDate: { $gt: now } }, // tous les trajets après aujourd'hui
-        { 
-          departureDate: { $eq: now.toISOString().split('T')[0] } // trajets d'aujourd'hui
+  const now = new Date();
+  let matchConditions = {
+    $or: [
+      { departureDate: { $gt: now } },
+      { 
+        departureDate: { 
+          $gte: new Date(now.getFullYear(), now.getMonth(), now.getDate())
         }
-      ]
-    })
-      .populate('from', 'name country')
-      .populate('to', 'name country')
-      .populate('bus', 'name type capacity amenities')
-      .populate('companyName', 'name logo description')
-      .lean();
-
-    // ➡️ Filtrage en mémoire des trajets du jour par heure
-    routes = routes.filter(route => {
-      const depDate = new Date(route.departureDate);
-      const today = new Date();
-
-      // si la date est future, ok
-      if (depDate.toDateString() > today.toDateString()) return true;
-
-      // si c'est aujourd'hui → comparer l'heure de départ
-      if (depDate.toDateString() === today.toDateString()) {
-        if (!route.departureTime) return false;
-
-        const [h, m] = route.departureTime.split(':').map(Number);
-        const depTime = new Date(depDate);
-        depTime.setHours(h, m, 0, 0);
-
-        return depTime >= today;
       }
+    ]
+  };
 
-      return false;
-    });
+  // Filtres additionnels
+  if (from) {
+    const fromCity = await City.findOne({ name: new RegExp(from, "i") }, "_id").lean();
+    if (fromCity) matchConditions.from = fromCity._id;
+  }
+  
+  if (to) {
+    const toCity = await City.findOne({ name: new RegExp(to, "i") }, "_id").lean();
+    if (toCity) matchConditions.to = toCity._id;
+  }
 
-    if (!routes.length) {
-      return res.status(200).json({
-        success: true,
-        count: 0,
-        data: [],
-        message: "Aucune route disponible"
-      });
+  if (company) {
+    const companyObj = await Company.findOne({ name: new RegExp(company, "i") }, "_id").lean();
+    if (companyObj) matchConditions.companyName = companyObj._id;
+  }
+
+  // Pipeline d'agrégation avec pagination
+  const pipeline = [
+    { $match: matchConditions },
+    {
+      $lookup: {
+        from: "cities",
+        localField: "from",
+        foreignField: "_id",
+        as: "fromCity",
+        pipeline: [{ $project: { name: 1, country: 1 } }]
+      }
+    },
+    {
+      $lookup: {
+        from: "cities",
+        localField: "to",
+        foreignField: "_id",
+        as: "toCity",
+        pipeline: [{ $project: { name: 1, country: 1 } }]
+      }
+    },
+    {
+      $lookup: {
+        from: "companies",
+        localField: "companyName",
+        foreignField: "_id",
+        as: "company",
+        pipeline: [{ $project: { name: 1, logo: 1 } }]
+      }
+    },
+    {
+      $lookup: {
+        from: "buses",
+        localField: "bus",
+        foreignField: "_id",
+        as: "busInfo",
+        pipeline: [{ $project: { name: 1, totalSeats: 1, amenities: 1 } }]
+      }
+    },
+    {
+      $addFields: {
+        from: { $arrayElemAt: ["$fromCity", 0] },
+        to: { $arrayElemAt: ["$toCity", 0] },
+        companyName: { $arrayElemAt: ["$company", 0] },
+        bus: { $arrayElemAt: ["$busInfo", 0] }
+      }
+    },
+    { $sort: { departureDate: 1, departureTime: 1 } },
+    { $skip: skip },
+    { $limit: parseInt(limit) }
+  ];
+
+  // Exécution parallèle de la requête et du comptage
+  const [routes, totalCount] = await Promise.all([
+    Route.aggregate(pipeline),
+    Route.countDocuments(matchConditions)
+  ]);
+
+  // Post-filtrage pour l'heure (seulement pour aujourd'hui)
+  const filteredRoutes = routes.filter(route => {
+    const depDate = new Date(route.departureDate);
+    const today = new Date();
+
+    if (depDate.toDateString() > today.toDateString()) return true;
+
+    if (depDate.toDateString() === today.toDateString()) {
+      if (!route.departureTime) return false;
+
+      const [h, m] = route.departureTime.split(':').map(Number);
+      const depTime = new Date(depDate);
+      depTime.setHours(h, m, 0, 0);
+
+      return depTime >= today;
     }
 
-    res.status(200).json({
-      success: true,
-      count: routes.length,
-      data: routes
-    });
-  } catch (error) {
-    console.error("Erreur getAllRoutes:", error);
-    res.status(500).json({
-      success: false,
-      message: "Erreur serveur lors de la récupération des routes"
-    });
+    return false;
+  });
+
+  const result = {
+    success: true,
+    data: filteredRoutes,
+    pagination: {
+      current_page: parseInt(page),
+      per_page: parseInt(limit),
+      total_items: totalCount,
+      total_pages: Math.ceil(totalCount / parseInt(limit)),
+      has_next: parseInt(page) * parseInt(limit) < totalCount,
+      has_prev: parseInt(page) > 1
+    },
+    count: filteredRoutes.length
+  };
+
+  // Cache adaptatif
+  const ttl = filteredRoutes.length > 0 ? 900 : 300; // 15min si résultats, 5min sinon
+  try {
+    await redis.set(cacheKey, JSON.stringify(result), "EX", ttl);
+  } catch (redisError) {
+    console.warn("Erreur cache:", redisError.message);
   }
+
+  res.json(result);
 });
 
+// 5. OPTIMISATION AVEC CACHE EN MÉMOIRE (FALLBACK)
+
+class MemoryCache {
+  constructor() {
+    this.cache = new Map();
+    this.ttl = new Map();
+  }
+
+  set(key, value, ttlSeconds = 3600) {
+    this.cache.set(key, value);
+    this.ttl.set(key, Date.now() + (ttlSeconds * 1000));
+    
+    // Nettoyage automatique
+    setTimeout(() => {
+      this.delete(key);
+    }, ttlSeconds * 1000);
+  }
+
+  get(key) {
+    if (this.ttl.get(key) && Date.now() > this.ttl.get(key)) {
+      this.delete(key);
+      return null;
+    }
+    return this.cache.get(key);
+  }
+
+  delete(key) {
+    this.cache.delete(key);
+    this.ttl.delete(key);
+  }
+
+  clear() {
+    this.cache.clear();
+    this.ttl.clear();
+  }
+}
+
+// Instance globale de cache mémoire
+const memoryCache = new MemoryCache();
+
+// 6. MIDDLEWARE DE CACHE HYBRIDE (Redis + Mémoire)
+
+export const hybridCache = (ttl = 3600) => {
+  return async (req, res, next) => {
+    const cacheKey = `${req.originalUrl || req.url}`;
+    
+    try {
+      // Essayer Redis d'abord
+      let cached = null;
+      try {
+        cached = await redis.get(cacheKey);
+      } catch (redisError) {
+        // Fallback vers cache mémoire
+        cached = memoryCache.get(cacheKey);
+        if (cached) {
+          console.log("⚡ Cache mémoire utilisé");
+          return res.json(JSON.parse(cached));
+        }
+      }
+      
+      if (cached) {
+        console.log("⚡ Cache Redis utilisé");
+        return res.json(JSON.parse(cached));
+      }
+    } catch (error) {
+      console.warn("Erreur cache:", error.message);
+    }
+
+    // Intercepter la réponse pour la mettre en cache
+    const originalJson = res.json;
+    res.json = function(data) {
+      const dataStr = JSON.stringify(data);
+      
+      // Stocker dans Redis
+      redis.set(cacheKey, dataStr, "EX", ttl).catch(err => {
+        console.warn("Erreur Redis cache:", err.message);
+        // Fallback vers cache mémoire
+        memoryCache.set(cacheKey, dataStr, ttl);
+      });
+
+      return originalJson.call(this, data);
+    };
+
+    next();
+  };
+};
 
 /**
  * @desc    Villes de départ uniques
@@ -1193,20 +1416,37 @@ export const getArrivalCities = asyncHandler(async (req, res) => {
  */
 export const getAllCities = asyncHandler(async (req, res) => {
   const cacheKey = "cities:all";
-  const cached = await redis.get(cacheKey);
-
-  if (cached) {
-    console.log("⚡ getAllCities depuis Redis");
-    return res.json(JSON.parse(cached));
+  
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      console.log("⚡ getAllCities depuis Redis");
+      return res.json(JSON.parse(cached));
+    }
+  } catch (redisError) {
+    console.warn("Redis indisponible:", redisError.message);
   }
 
-  const cities = await City.find({}).select("name -_id").lean();
-  const cityNames = cities.map(city => city.name).filter(Boolean);
+  // Projection optimisée - ne récupérer que les champs nécessaires
+  const cities = await City.find({}, "name country").lean();
+  const cityNames = cities.map(city => city.name).filter(Boolean).sort();
 
-  const result = { success: true, data: cityNames.sort() };
-  await redis.set(cacheKey, JSON.stringify(result), "EX", 3600); // 1h de cache
+  const result = { 
+    success: true, 
+    data: cityNames,
+    count: cityNames.length
+  };
+  
+  // Cache long pour les données statiques
+  try {
+    await redis.set(cacheKey, JSON.stringify(result), "EX", 7200); // 2h
+  } catch (redisError) {
+    console.warn("Erreur cache:", redisError.message);
+  }
+  
   res.json(result);
 });
+
 
 /**
  * @desc    Routes populaires
