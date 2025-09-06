@@ -176,3 +176,74 @@ export const sendResetPasswordEmail = async (user, resetUrl) => {
     throw new Error(`Échec de l'envoi de l'email: ${error.message}`);
   }
 };
+
+export const sendPartnerRequestNotification = async (partnerRequest) => {
+  const adminEmail = process.env.EMAIL_USER || 'admin@adjamegare.com';
+
+  const emailContent = `
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+        <meta charset="UTF-8">
+        <title>Nouvelle demande de partenariat - AdjameGare</title>
+        <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
+            h1 { color: #73D700; text-align: center; }
+            .info-box { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0; }
+            .highlight { font-weight: bold; color: #73D700; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤝 Nouvelle demande de partenariat</h1>
+            
+            <div class="info-box">
+                <h3>Informations de la compagnie :</h3>
+                <p><strong>Nom :</strong> ${partnerRequest.companyName}</p>
+                <p><strong>Email :</strong> ${partnerRequest.email}</p>
+                <p><strong>Téléphone :</strong> ${partnerRequest.phone}</p>
+                <p><strong>Date de demande :</strong> ${new Date(partnerRequest.createdAt).toLocaleString('fr-FR')}</p>
+            </div>
+            
+            ${partnerRequest.message ? `
+            <div class="info-box">
+                <h3>Message :</h3>
+                <p>${partnerRequest.message}</p>
+            </div>
+            ` : ''}
+            
+            <p style="text-align: center; margin-top: 30px;">
+                <strong>Connectez-vous à l'admin pour traiter cette demande.</strong>
+            </p>
+        </div>
+    </body>
+    </html>
+  `;
+
+  const mailOptions = {
+    // CORRECTION 1: Utilisation cohérente de EMAIL_USER au lieu de mélanger avec EMAIL_FROM
+    from: `AdjameGare <${process.env.EMAIL_USER}>`,
+    to: adminEmail,
+    subject: `Nouvelle demande de partenariat - ${partnerRequest.companyName}`,
+    html: emailContent,
+  };
+
+  try {
+
+    const info = await transporter.sendMail(mailOptions);
+    return info;
+  } catch (error) {
+    console.error('❌ Erreur détaillée lors de l\'envoi email notification:', {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      response: error.response,
+      responseCode: error.responseCode,
+      to: adminEmail,
+      from: process.env.EMAIL_USER
+    });
+    
+    throw new Error(`Erreur lors de l'envoi de la notification email: ${error.message}`);
+  }
+};
