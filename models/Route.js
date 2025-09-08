@@ -5,19 +5,23 @@ const RouteSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'City',
     required: true,
+    index: true
   },
   to: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'City',
     required: true,
+    index: true
   },
   departureDate: {
     type: Date,
-    required: true
+    required: true,
+    index: true
   },
   departureTime: {
     type: String,
-    required: true
+    required: true,
+    index: true
   },
   arrivalTime: {
     type: String,
@@ -34,7 +38,8 @@ const RouteSchema = new mongoose.Schema({
   price: {
     type: Number,
     required: true,
-    min: 0
+    min: 0,
+    index: true
   },
   availableSeats: {
     type: Number,
@@ -53,7 +58,8 @@ const RouteSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Company',
     required: true,
-    trim: true
+    trim: true,
+    index: true
   },
   bus: {
     type: mongoose.Schema.Types.ObjectId,
@@ -65,7 +71,9 @@ const RouteSchema = new mongoose.Schema({
     default: false
   }
 }, { timestamps: true });
+RouteSchema.index({ from: 1, to: 1, departureDate: 1 ,departureTime:1 , companyName:1});
 
 const Route = mongoose.model('Route', RouteSchema);
+
 
 export default Route;

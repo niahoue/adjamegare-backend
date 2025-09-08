@@ -8,6 +8,7 @@ import City from '../models/City.js';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { isValidObjectId } from 'mongoose';
 import redis from '../config/redisClient.js';
+import { memoryCache } from '../utils/memoryCache.js';
 /**
  * @desc    Rechercher des trajets disponibles
  * @route   GET /api/travel/routes/search
@@ -1279,45 +1280,6 @@ export const getAllRoutes = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
-// 5. OPTIMISATION AVEC CACHE EN MÉMOIRE (FALLBACK)
-
-class MemoryCache {
-  constructor() {
-    this.cache = new Map();
-    this.ttl = new Map();
-  }
-
-  set(key, value, ttlSeconds = 3600) {
-    this.cache.set(key, value);
-    this.ttl.set(key, Date.now() + (ttlSeconds * 1000));
-    
-    // Nettoyage automatique
-    setTimeout(() => {
-      this.delete(key);
-    }, ttlSeconds * 1000);
-  }
-
-  get(key) {
-    if (this.ttl.get(key) && Date.now() > this.ttl.get(key)) {
-      this.delete(key);
-      return null;
-    }
-    return this.cache.get(key);
-  }
-
-  delete(key) {
-    this.cache.delete(key);
-    this.ttl.delete(key);
-  }
-
-  clear() {
-    this.cache.clear();
-    this.ttl.clear();
-  }
-}
-
-// Instance globale de cache mémoire
-const memoryCache = new MemoryCache();
 
 // 6. MIDDLEWARE DE CACHE HYBRIDE (Redis + Mémoire)
 

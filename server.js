@@ -35,23 +35,35 @@ const initializeRoutes = async () => {
     console.log('⚠️ Le serveur démarre sans trajets initialisés');
   }
 };
-
+// Fonction de pré-chargement du cache
+const preCache = async () => {
+  console.log("Pre-chargement du cache des routes populaires...");
+  try {
+    // Appelle la logique de votre contrôleur ou réimplémentez la ici
+    const popularRoutes = await Route.find({ popular: true })
+      .populate("from", "name country")
+      .populate("to", "name country")
+      .lean();
+      
+    const result = { success: true, data: popularRoutes };
+    await redis.set("routes:popular", JSON.stringify(result), "EX", 1800);
+    
+    console.log("✅ Cache des routes populaires pré-chargé.");
+  } catch (error) {
+    console.error("❌ Erreur lors du pré-chargement du cache:", error);
+  }
+};
 // Démarrage du serveur
 connectDB()
   .then(async () => {
     console.log('✅ Base de données connectée');
-    
-    // Démarrer les cron jobs après la connexion
+    await initializeRoutes();
+    await preCache();
     try {
       startCronJobs();
     } catch (error) {
       console.error('⚠️ Erreur lors du démarrage des cron jobs:', error);
     }
-    
-    // Initialiser les trajets si nécessaire (en arrière-plan)
-    setTimeout(async () => {
-      await initializeRoutes();
-    }, 2000); // Attendre 2 secondes pour que le serveur soit complètement démarré
     
     // Démarrer le serveur
     app.listen(PORT, () => {
