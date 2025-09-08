@@ -34,34 +34,13 @@ app.use(helmet({
 
 // OPTIMISATION 2: Compression optimisée
 app.use(compression({
-  level: 6, // Bon équilibre performance/compression
-  threshold: 1024, // Compresser seulement les réponses > 1KB
+  level: 6, 
+  threshold: 1024, 
   filter: (req, res) => {
-    // Ne pas compresser les réponses déjà compressées
     if (req.headers['x-no-compression']) return false;
     return compression.filter(req, res);
   }
 }));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: (req) => {
-    // Plus de requêtes pour les routes de données statiques
-    if (req.path.includes('/cities') || req.path.includes('/companies')) return 200;
-    if (req.path.includes('/routes/search')) return 50;
-    return 100;
-  },
-  message: {
-    success: false,
-    message: 'Trop de requêtes, veuillez réessayer plus tard.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  // Ignorer les requêtes internes de health check
-  skip: (req) => req.path === '/health'
-});
-app.use(limiter);
 
 // OPTIMISATION 4: CORS optimisé pour production
 const corsOptions = {
@@ -86,6 +65,27 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: (req) => {
+    if (req.path.includes('/cities') || req.path.includes('/companies')) return 200;
+    if (req.path.includes('/routes/search')) return 50;
+    return 100;
+  },
+  message: {
+    success: false,
+    message: 'Trop de requêtes, veuillez réessayer plus tard.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Ignorer les requêtes internes de health check
+  skip: (req) => req.path === '/health'
+});
+app.use(limiter);
+
+
 
 // OPTIMISATION 5: Logs conditionnels
 if (process.env.NODE_ENV === 'development') {
