@@ -11,7 +11,8 @@ import authRoutes from './routes/authRoutes.js';
 import travelRoutes from './routes/travelRoutes.js';
 import paymentRoutes from './routes/paymentRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
-import partnerRoutes from './routes/partnerRoutes.js'
+import partnerRoutes from './routes/partnerRoutes.js';
+import sitemapRouter from "./routes/sitemap.js";
 import { notFound, errorHandler } from './middlewares/errorMiddleware.js';
 
 dotenv.config();
@@ -91,9 +92,8 @@ app.use(limiter);
 if (process.env.NODE_ENV === 'development') {
   app.use(morgan('dev'));
 } else {
-  // Logs plus légers en production
   app.use(morgan('combined', {
-    skip: (req, res) => res.statusCode < 400 // Seulement les erreurs
+    skip: (req, res) => res.statusCode < 400 
   }));
 }
 
@@ -143,12 +143,10 @@ app.get('/', (req, res) => {
 
 // OPTIMISATION 8: Middleware pour ajouter des headers de performance
 app.use((req, res, next) => {
-  // Headers pour optimiser les requêtes
   res.set({
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'X-XSS-Protection': '1; mode=block',
-    // Header pour Cloudflare
     'CF-Cache-Status': 'DYNAMIC',
   });
   
@@ -165,6 +163,7 @@ app.use((req, res, next) => {
 });
 
 // Routes
+app.use("/", sitemapRouter);
 app.use('/api/users', authRoutes);
 app.use('/api/travel', travelRoutes);
 app.use('/api/payment', paymentRoutes);
