@@ -19,6 +19,10 @@ const CitySchema = new mongoose.Schema({
   image: { type: String }
 });
 
+// Index pour accélérer les recherches sur name et country
+CitySchema.index({ name: 1 });
+CitySchema.index({ country: 1 });
+
 
 const City = mongoose.model('City', CitySchema);
 

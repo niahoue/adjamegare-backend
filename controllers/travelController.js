@@ -454,10 +454,24 @@ export const createBooking = asyncHandler(async (req, res) => {
   // Décrémenter les sièges disponibles
   outboundRoute.availableSeats -= selectedSeats.length;
   await outboundRoute.save();
+  // Invalider le cache des routes après modification
+  try {
+    const keys = await redis.keys('routes:all*');
+    if (keys.length) await redis.del(keys);
+  } catch (e) {
+    console.warn('Erreur lors de l\'invalidation du cache des routes:', e.message);
+  }
 
   if (returnRoute) {
     returnRoute.availableSeats -= selectedSeats.length;
     await returnRoute.save();
+    // Invalider le cache des routes après modification
+    try {
+      const keys = await redis.keys('routes:all*');
+      if (keys.length) await redis.del(keys);
+    } catch (e) {
+      console.warn('Erreur lors de l\'invalidation du cache des routes:', e.message);
+    }
   }
 
   // Créer la réservation avec les snapshots des routes
@@ -596,12 +610,26 @@ export const updateBookingStatus = asyncHandler(async (req, res) => {
     if (outboundRoute) {
       outboundRoute.availableSeats += booking.selectedSeats.length;
       await outboundRoute.save();
+      // Invalider le cache des routes après modification
+      try {
+        const keys = await redis.keys('routes:all*');
+        if (keys.length) await redis.del(keys);
+      } catch (e) {
+        console.warn('Erreur lors de l\'invalidation du cache des routes:', e.message);
+      }
     }
     if (booking.returnRoute) {
       const returnRoute = await Route.findById(booking.returnRoute);
       if (returnRoute) {
         returnRoute.availableSeats += booking.selectedSeats.length;
         await returnRoute.save();
+        // Invalider le cache des routes après modification
+        try {
+          const keys = await redis.keys('routes:all*');
+          if (keys.length) await redis.del(keys);
+        } catch (e) {
+          console.warn('Erreur lors de l\'invalidation du cache des routes:', e.message);
+        }
       }
     }
 
@@ -1376,9 +1404,13 @@ export const getArrivalCities = asyncHandler(async (req, res) => {
  * @desc    Obtenir toutes les villes
  * @route   GET /api/travel/cities/all
  */
+
 export const getAllCities = asyncHandler(async (req, res) => {
-  const cacheKey = "cities:all";
-  
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 50;
+  const skip = (page - 1) * limit;
+  const cacheKey = `cities:all:page:${page}:limit:${limit}`;
+
   try {
     const cached = await redis.get(cacheKey);
     if (cached) {
@@ -1390,24 +1422,38 @@ export const getAllCities = asyncHandler(async (req, res) => {
   }
 
   // Projection optimisée - ne récupérer que les champs nécessaires
-  const cities = await City.find({}, "name country").lean();
+  const cities = await City.find({}, "name country").skip(skip).limit(limit).lean();
   const cityNames = cities.map(city => city.name).filter(Boolean).sort();
 
-  const result = { 
-    success: true, 
+  // Compter le total pour la pagination
+  const total = await City.countDocuments();
+
+  const result = {
+    success: true,
     data: cityNames,
-    count: cityNames.length
+    count: cityNames.length,
+    total,
+    page,
+    limit
   };
-  
+
   // Cache long pour les données statiques
   try {
     await redis.set(cacheKey, JSON.stringify(result), "EX", 7200); // 2h
   } catch (redisError) {
     console.warn("Erreur cache:", redisError.message);
   }
-  
+
   res.json(result);
 });
+
+// Exemple d'invalidation du cache après modification d'une ville
+// À placer dans les handlers de création, update ou suppression de ville :
+// await redis.keys('cities:all*').then(keys => keys.length && redis.del(keys));
+
+// Exemple d'invalidation du cache après modification d'une route
+// À placer dans les handlers de création, update ou suppression de route :
+// await redis.keys('routes:all*').then(keys => keys.length && redis.del(keys));
 
 
 /**

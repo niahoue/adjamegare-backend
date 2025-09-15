@@ -66,6 +66,11 @@ const RouteSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
+// Index composé pour accélérer les recherches sur from, to, departureDate
+RouteSchema.index({ from: 1, to: 1, departureDate: 1 });
+// Index sur companyName pour les filtres compagnies
+RouteSchema.index({ companyName: 1 });
+
 const Route = mongoose.model('Route', RouteSchema);
 
 export default Route;
